@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 
 const notificationSchema = new mongoose.Schema(
@@ -6,38 +5,59 @@ const notificationSchema = new mongoose.Schema(
     studentId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Student",
-      required: true,
+      default: null,
     },
-    attendanceId: {
+    userId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Attendance",
-      required: true,
+      ref: "User",
+      default: null,
     },
-    parentContact: {
+    targetRole: {
       type: String,
-      required: true,
+      enum: ["all", "admin", "principal", "hod", "faculty", "student"],
+      default: null,
+    },
+    title: {
+      type: String,
+      default: "College ERP Notification",
     },
     message: {
       type: String,
       required: true,
     },
+    type: {
+      type: String,
+      enum: ["attendance", "leave", "adjustment", "payroll", "system", "general"],
+      default: "general",
+    },
+    isRead: {
+      type: Boolean,
+      default: false,
+    },
+    attendanceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Attendance",
+      default: null,
+    },
+    parentContact: {
+      type: String,
+      default: "",
+    },
     sentAt: {
       type: Date,
-      default: null,
+      default: Date.now,
     },
     deliveryStatus: {
       type: String,
-      enum: ["Pending", "Sent", "Failed"],
-      default: "Pending",
+      enum: ["Pending", "Sent", "Failed", "NotRequired"],
+      default: "Sent",
     },
     attempts: {
       type: Number,
-      default: 0,
+      default: 1,
     },
   },
   { timestamps: true }
 );
-
-notificationSchema.index({ attendanceId: 1 }, { unique: true });
 
 module.exports = mongoose.model("Notification", notificationSchema);

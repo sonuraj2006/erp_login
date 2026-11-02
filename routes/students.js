@@ -1,23 +1,14 @@
-
 const express = require("express");
 const mongoose = require("mongoose");
 
 const Student = require("../models/student");
 const Attendance = require("../models/attendance");
-const authMiddleware = require("../middleware/authMiddleware");
+const AttendanceRecord = require("../models/attendanceRecord");
+const { authMiddleware, requireRole } = require("../middleware/authMiddleware");
+const { logAudit } = require("../services/auditService");
 
 const router = express.Router();
-
 router.use(authMiddleware);
-
-function requireAdmin(req, res, next) {
-  if (req.user.role !== "admin") {
-    return res.status(403).json({
-      message: "Only administrators can modify student records."
-    });
-  }
-  next();
-}
 
 function validEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -27,64 +18,61 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function handleDatabaseError(error, res) {
-  if (error.code === 11000) {
-    return res.status(409).json({
-      message: "This student ID or class and roll number already exists."
-    });
-  }
-
-  console.error("Student API error:", error.message);
-  return res.status(500).json({
-    message: "Unable to process the student request."
-  });
-}
-
 // GET /api/students
-// Admin and faculty can view/search students.
-// Optional query parameters: ?classId=CSE-A&search=101
+// Support filtering by department, semester, section, classId, and search term
 router.get("/", async (req, res) => {
   try {
     const filter = {};
 
-    if (typeof req.query.classId === "string" && req.query.classId.trim()) {
+    if (req.query.classId && req.query.classId.trim() && req.query.classId !== "all") {
       filter.classId = req.query.classId.trim();
+    }
+    if (req.query.department && req.query.department !== "all") {
+      filter.department = req.query.department.trim();
+    }
+    if (req.query.semester && req.query.semester !== "all") {
+      filter.semester = Number(req.query.semester);
+    }
+    if (req.query.section && req.query.section !== "all") {
+      filter.section = req.query.section.trim();
     }
 
     if (typeof req.query.search === "string" && req.query.search.trim()) {
       const search = escapeRegex(req.query.search.trim());
-
       filter.$or = [
         { name: { $regex: search, $options: "i" } },
         { rollNumber: { $regex: search, $options: "i" } },
-        { studentId: { $regex: search, $options: "i" } }
+        { studentId: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
       ];
     }
 
     const students = await Student.find(filter)
-      .sort({ classId: 1, rollNumber: 1 })
+      .sort({ department: 1, semester: 1, section: 1, rollNumber: 1 })
       .limit(500)
       .lean();
 
     return res.json({
       count: students.length,
-      students
+      students,
     });
   } catch (error) {
-    return handleDatabaseError(error, res);
+    console.error("Student search error:", error);
+    return res.status(500).json({ message: "Unable to process student request." });
   }
 });
 
 // GET /api/students/classes
-// Get list of distinct classes
 router.get("/classes", async (req, res) => {
   try {
     const classes = await Student.distinct("classId");
+    const departments = await Student.distinct("department");
     return res.json({
-      classes: classes.filter(Boolean).sort()
+      classes: classes.filter(Boolean).sort(),
+      departments: departments.filter(Boolean).sort(),
     });
   } catch (error) {
-    return handleDatabaseError(error, res);
+    return res.status(500).json({ message: "Failed to fetch classes." });
   }
 });
 
@@ -96,146 +84,93 @@ router.get("/:id", async (req, res) => {
     }
 
     const student = await Student.findById(req.params.id).lean();
-
     if (!student) {
       return res.status(404).json({ message: "Student not found." });
     }
 
     return res.json({ student });
   } catch (error) {
-    return handleDatabaseError(error, res);
+    return res.status(500).json({ message: "Failed to fetch student details." });
   }
 });
 
-// POST /api/students
-// Admin only
-router.post("/", requireAdmin, async (req, res) => {
+// POST /api/students - Admin only
+router.post("/", requireRole("admin"), async (req, res) => {
   try {
     const {
       studentId,
       name,
       rollNumber,
+      department = "CSE",
+      year = 3,
+      semester = 5,
+      section = "A",
       classId,
+      email = "",
+      phone = "",
       parentName,
       parentEmail,
-      parentPhone
+      parentPhone = "",
     } = req.body;
 
-    const requiredFields = {
-      studentId,
-      name,
-      rollNumber,
-      classId,
-      parentName,
-      parentEmail
-    };
-
-    for (const [field, value] of Object.entries(requiredFields)) {
-      if (typeof value !== "string" || !value.trim()) {
-        return res.status(400).json({
-          message: `${field} is required and must be text.`
-        });
-      }
-    }
-
-    if (!validEmail(parentEmail.trim())) {
+    if (!studentId || !name || !rollNumber || !parentName || !parentEmail) {
       return res.status(400).json({
-        message: "Enter a valid parent email address."
+        message: "studentId, name, rollNumber, parentName, and parentEmail are required.",
       });
     }
 
-    if (
-      parentPhone !== undefined &&
-      typeof parentPhone !== "string"
-    ) {
-      return res.status(400).json({
-        message: "Parent phone must be text."
-      });
-    }
+    const studentClass = classId || `${department}-${section}`;
 
     const student = await Student.create({
       studentId: studentId.trim(),
       name: name.trim(),
-      rollNumber: rollNumber.trim(),
-      classId: classId.trim(),
+      rollNumber: rollNumber.trim().toUpperCase(),
+      department: department.trim().toUpperCase(),
+      year: Number(year),
+      semester: Number(semester),
+      section: section.trim().toUpperCase(),
+      classId: studentClass,
+      email: email.trim().toLowerCase(),
+      phone: phone.trim(),
       parentName: parentName.trim(),
       parentEmail: parentEmail.trim().toLowerCase(),
-      parentPhone: (parentPhone || "").trim()
+      parentPhone: parentPhone.trim(),
+    });
+
+    await logAudit(req, "CREATE_STUDENT", "Student", student._id, {
+      rollNumber: student.rollNumber,
+      name: student.name,
     });
 
     return res.status(201).json({
       message: "Student added successfully.",
-      student
+      student,
     });
   } catch (error) {
-    return handleDatabaseError(error, res);
+    if (error.code === 11000) {
+      return res.status(409).json({
+        message: "A student with this student ID or roll number already exists.",
+      });
+    }
+    return res.status(500).json({ message: error.message || "Failed to add student." });
   }
 });
 
-// PUT /api/students/:id
-// Admin only; only approved fields can be updated.
-router.put("/:id", requireAdmin, async (req, res) => {
+// PUT /api/students/:id - Admin only
+router.put("/:id", requireRole("admin"), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ message: "Invalid student ID." });
     }
 
-    const allowedFields = [
-      "studentId",
-      "name",
-      "rollNumber",
-      "classId",
-      "parentName",
-      "parentEmail",
-      "parentPhone"
-    ];
+    const updates = { ...req.body };
+    delete updates._id;
 
-    const updates = {};
-
-    for (const field of allowedFields) {
-      if (req.body[field] !== undefined) {
-        if (typeof req.body[field] !== "string") {
-          return res.status(400).json({
-            message: `${field} must be text.`
-          });
-        }
-
-        updates[field] = req.body[field].trim();
-      }
-    }
-
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({
-        message: "Provide at least one field to update."
-      });
-    }
-
-    for (const field of [
-      "studentId",
-      "name",
-      "rollNumber",
-      "classId",
-      "parentName",
-      "parentEmail"
-    ]) {
-      if (
-        updates[field] !== undefined &&
-        !updates[field]
-      ) {
-        return res.status(400).json({
-          message: `${field} cannot be empty.`
-        });
-      }
-    }
-
-    if (updates.parentEmail !== undefined) {
-      updates.parentEmail = updates.parentEmail.toLowerCase();
-
-      if (!validEmail(updates.parentEmail)) {
-        return res.status(400).json({
-          message: "Enter a valid parent email address."
-        });
-      }
+    if (updates.rollNumber) updates.rollNumber = updates.rollNumber.trim().toUpperCase();
+    if (updates.department) updates.department = updates.department.trim().toUpperCase();
+    if (updates.section) updates.section = updates.section.trim().toUpperCase();
+    if (updates.department && updates.section && !updates.classId) {
+      updates.classId = `${updates.department}-${updates.section}`;
     }
 
     const student = await Student.findByIdAndUpdate(
@@ -248,45 +183,49 @@ router.put("/:id", requireAdmin, async (req, res) => {
       return res.status(404).json({ message: "Student not found." });
     }
 
+    await logAudit(req, "UPDATE_STUDENT", "Student", student._id, {
+      rollNumber: student.rollNumber,
+    });
+
     return res.json({
       message: "Student updated successfully.",
-      student
+      student,
     });
   } catch (error) {
-    return handleDatabaseError(error, res);
+    return res.status(500).json({ message: error.message || "Failed to update student." });
   }
 });
 
-// DELETE /api/students/:id
-// Admin only; preserve students with attendance history.
-router.delete("/:id", requireAdmin, async (req, res) => {
+// DELETE /api/students/:id - Admin only
+router.delete("/:id", requireRole("admin"), async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ message: "Invalid student ID." });
     }
 
     const student = await Student.findById(req.params.id);
-
     if (!student) {
       return res.status(404).json({ message: "Student not found." });
     }
 
-    const attendanceExists = await Attendance.exists({
-      studentId: student._id
-    });
+    const attExists =
+      (await Attendance.exists({ studentId: student._id })) ||
+      (await AttendanceRecord.exists({ studentId: student._id }));
 
-    if (attendanceExists) {
+    if (attExists) {
       return res.status(409).json({
-        message:
-          "This student has attendance history and cannot be deleted. Update the record instead."
+        message: "Cannot delete student with attendance records. Deactivate account instead.",
       });
     }
 
     await Student.deleteOne({ _id: student._id });
+    await logAudit(req, "DELETE_STUDENT", "Student", req.params.id, {
+      rollNumber: student.rollNumber,
+    });
 
     return res.json({ message: "Student deleted successfully." });
   } catch (error) {
-    return handleDatabaseError(error, res);
+    return res.status(500).json({ message: "Failed to delete student." });
   }
 });
 

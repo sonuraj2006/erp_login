@@ -3,15 +3,67 @@ const mongoose = require("mongoose");
 const Notification = require("../models/notification");
 const Attendance = require("../models/attendance");
 const Student = require("../models/student");
-const authMiddleware = require("../middleware/authMiddleware");
+const { authMiddleware } = require("../middleware/authMiddleware");
 const { sendAbsenceEmail } = require("../services/emailService");
 
 const router = express.Router();
-
 router.use(authMiddleware);
 
-// GET /api/notifications
-// Retrieves list of parent notifications with optional status filter
+// GET /api/notifications/my - Get user-specific and role notifications
+router.get("/my", async (req, res) => {
+  try {
+    const userId = req.user.sub;
+    const role = req.user.role;
+
+    const notifications = await Notification.find({
+      $or: [
+        { userId },
+        { targetRole: role },
+        { targetRole: "all" },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    const unreadCount = notifications.filter((n) => !n.isRead).length;
+
+    return res.json({ notifications, unreadCount });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to fetch notifications." });
+  }
+});
+
+// Mark single notification as read
+router.patch("/:id/read", async (req, res) => {
+  try {
+    await Notification.findByIdAndUpdate(req.params.id, { isRead: true });
+    return res.json({ message: "Notification marked as read." });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to update notification." });
+  }
+});
+
+// Mark all as read
+router.post("/mark-all-read", async (req, res) => {
+  try {
+    const userId = req.user.sub;
+    const role = req.user.role;
+
+    await Notification.updateMany(
+      {
+        $or: [{ userId }, { targetRole: role }, { targetRole: "all" }],
+        isRead: false,
+      },
+      { isRead: true }
+    );
+
+    return res.json({ message: "All notifications marked as read." });
+  } catch (err) {
+    return res.status(500).json({ message: "Failed to mark all as read." });
+  }
+});
+
+// Legacy parent absence notifications list
 router.get("/", async (req, res) => {
   try {
     const filter = {};
@@ -23,27 +75,21 @@ router.get("/", async (req, res) => {
       .populate("studentId", "studentId name rollNumber classId parentName parentEmail parentPhone")
       .populate("attendanceId", "date status notificationStatus")
       .sort({ createdAt: -1 })
-      .limit(200)
+      .limit(100)
       .lean();
 
     return res.json({
       count: notifications.length,
-      notifications
+      notifications,
     });
   } catch (error) {
-    console.error("Notifications list error:", error.message);
     return res.status(500).json({ message: "Unable to retrieve notifications." });
   }
 });
 
-// POST /api/notifications/:id/retry
-// Retries sending email for a failed notification
+// Retry parent absence email
 router.post("/:id/retry", async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ message: "Invalid notification ID." });
-    }
-
     const notification = await Notification.findById(req.params.id)
       .populate("studentId")
       .populate("attendanceId");
@@ -67,28 +113,13 @@ router.post("/:id/retry", async (req, res) => {
       notification.sentAt = new Date();
       await notification.save();
 
-      attendance.notificationStatus = "Sent";
-      await attendance.save();
-
-      return res.json({
-        message: "Email re-sent successfully.",
-        notification
-      });
+      return res.json({ message: "Email re-sent successfully.", notification });
     } catch (emailError) {
-      console.error("Notification retry failed:", emailError.message);
       notification.deliveryStatus = "Failed";
       await notification.save();
-
-      attendance.notificationStatus = "Failed";
-      await attendance.save();
-
-      return res.status(500).json({
-        message: `Retry failed: ${emailError.message}`,
-        notification
-      });
+      return res.status(500).json({ message: `Retry failed: ${emailError.message}`, notification });
     }
   } catch (error) {
-    console.error("Notification retry error:", error.message);
     return res.status(500).json({ message: "Unable to retry notification." });
   }
 });

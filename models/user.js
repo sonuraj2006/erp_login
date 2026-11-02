@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 
 const userSchema = new mongoose.Schema(
@@ -21,8 +20,28 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["admin", "faculty"],
-      default: "faculty",
+      enum: ["admin", "principal", "hod", "faculty", "student"],
+      default: "student",
+      required: true,
+    },
+    status: {
+      type: String,
+      enum: ["active", "inactive"],
+      default: "active",
+    },
+    department: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    phone: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    profileRef: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null,
     },
   },
   { timestamps: true }

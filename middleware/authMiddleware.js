@@ -1,4 +1,3 @@
-
 const jwt = require("jsonwebtoken");
 
 function authMiddleware(req, res, next) {
@@ -10,17 +9,18 @@ function authMiddleware(req, res, next) {
     });
   }
 
-  const token = header.slice("Bearer ".length);
+  const token = header.slice("Bearer ".length).trim();
 
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    if (!req.user.sub || !req.user.role) {
+    if (!decoded.sub || !decoded.role) {
       return res.status(401).json({
         message: "Invalid token payload.",
       });
     }
 
+    req.user = decoded;
     next();
   } catch (error) {
     return res.status(401).json({
@@ -28,5 +28,25 @@ function authMiddleware(req, res, next) {
     });
   }
 }
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user || !req.user.role) {
+      return res.status(401).json({ message: "Authentication required." });
+    }
+
+    // "admin" typically has access to everything
+    if (roles.includes(req.user.role) || req.user.role === "admin") {
+      return next();
+    }
+
+    return res.status(403).json({
+      message: `Access denied. Requires one of roles: ${roles.join(", ")}`,
+    });
+  };
+}
+
+authMiddleware.authMiddleware = authMiddleware;
+authMiddleware.requireRole = requireRole;
 
 module.exports = authMiddleware;
